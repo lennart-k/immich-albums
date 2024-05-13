@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use clap::Parser;
 use openapi::apis::album_api::{self};
 use openapi::apis::configuration::{ApiKey, Configuration};
+use openapi::apis::library_api;
 use openapi::apis::search_api::search_metadata;
 use openapi::models::{BulkIdsDto, CreateAlbumDto, MetadataSearchDto, UpdateAlbumDto};
 use serde::{Deserialize, Serialize};
@@ -159,6 +160,7 @@ async fn update_album_dir(
     api_config: &Configuration,
     album_id: Uuid,
     album_dir: &Path,
+    exclusion_patterns: &Vec<glob::Pattern>,
 ) -> anyhow::Result<()> {
     let mut image_ids = Vec::new();
     for entry in WalkDir::new(album_dir) {
@@ -167,6 +169,13 @@ async fn update_album_dir(
             continue;
         }
         let path = entry.path().canonicalize()?;
+        if exclusion_patterns
+            .iter()
+            .any(|pattern| pattern.matches(path.to_str().unwrap()))
+        {
+            // If file is excluded, ignore
+            continue;
+        }
         let relpath = path.strip_prefix(&args.real_album_path)?;
         let immich_path = Path::new(&args.immich_album_path).join(relpath);
         let search_result = search_metadata(
@@ -197,13 +206,14 @@ async fn handle_album_folder(
     args: &Args,
     api_config: &Configuration,
     album_info_path: &Path,
+    exclusion_patterns: &Vec<glob::Pattern>,
 ) -> anyhow::Result<()> {
     let album_folder = album_info_path.parent().ok_or(anyhow!("wtf?"))?;
 
     let mut album_info: AlbumInfo = toml::from_str(&fs::read_to_string(album_info_path)?)?;
     let album_id = ensure_album(api_config, &mut album_info, album_info_path).await?;
     dbg!(&album_info.metadata.name);
-    update_album_dir(args, api_config, album_id, album_folder).await?;
+    update_album_dir(args, api_config, album_id, album_folder, exclusion_patterns).await?;
     Ok(())
 }
 
@@ -219,6 +229,15 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
 
+    let library =
+        library_api::get_library(&api_config, &args.immich_library_id.to_string()).await?;
+    let mut exclusion_patterns: Vec<glob::Pattern> = library
+        .exclusion_patterns
+        .iter()
+        .map(|pattern| glob::Pattern::new(&pattern).unwrap())
+        .collect();
+    exclusion_patterns.push(glob::Pattern::new("**/*.toml").unwrap());
+
     for entry in WalkDir::new(args.real_album_path.clone()) {
         let entry = entry?;
         if !entry.file_type().is_file() {
@@ -233,8 +252,7 @@ async fn main() -> anyhow::Result<()> {
             }
             None => continue,
         };
-        let album_info_path = path;
-        handle_album_folder(&args, &api_config, album_info_path).await?;
+        handle_album_folder(&args, &api_config, path, &exclusion_patterns).await?;
     }
 
     Ok(())
