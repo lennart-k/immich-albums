@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs::{self};
 use std::path::Path;
 use std::str::FromStr;
@@ -5,6 +6,7 @@ use std::str::FromStr;
 use anyhow::anyhow;
 use chrono::{DateTime, Utc};
 use clap::Parser;
+use log::{info, warn};
 use openapi::apis::album_api::{self};
 use openapi::apis::configuration::{ApiKey, Configuration};
 use openapi::apis::library_api;
@@ -72,8 +74,7 @@ async fn ensure_album(
     // TODO: clean up jank
     if let Some(album_id) = album_info.immich.album_id {
         let album =
-            album_api::get_album_info(&api_config, &album_id.to_string(), None, Some(false))
-                .await?;
+            album_api::get_album_info(api_config, &album_id.to_string(), None, Some(false)).await?;
         // TODO: Maybe handle non-existing album?
 
         // Album already exists, now ensure metadata is correct
@@ -89,11 +90,11 @@ async fn ensure_album(
             if let Some(file_updated_at) = album_info.immich.updated_at {
                 if immich_updated_at > file_updated_at {
                     // Immich newer than local
-                    println!("Updating the local album metadata because we've updated on Immich");
+                    info!("Updating the local album metadata because we've updated on Immich");
                     album_info.metadata = immich_metadata;
                 } else {
                     // Local newer than Immich
-                    println!("Updating the Immich album metadata because we've updated locally");
+                    info!("Updating the Immich album metadata because we've updated locally");
                     let updated_at = album_api::update_album_info(
                         api_config,
                         &album_id.to_string(),
@@ -109,7 +110,7 @@ async fn ensure_album(
                 }
             } else {
                 // We don't know, we will choose the local version
-                println!("Updating the Immich album metadata because we don't know what's newer");
+                info!("Updating the Immich album metadata because we don't know what's newer");
                 let updated_at = album_api::update_album_info(
                     api_config,
                     &album_id.to_string(),
@@ -150,7 +151,7 @@ async fn add_assets_to_album(
     album_id: &Uuid,
     ids: Vec<Uuid>,
 ) -> anyhow::Result<()> {
-    album_api::add_assets_to_album(&api_config, &album_id.to_string(), BulkIdsDto { ids }, None)
+    album_api::add_assets_to_album(api_config, &album_id.to_string(), BulkIdsDto { ids }, None)
         .await?;
     Ok(())
 }
@@ -160,7 +161,7 @@ async fn update_album_dir(
     api_config: &Configuration,
     album_id: Uuid,
     album_dir: &Path,
-    exclusion_patterns: &Vec<glob::Pattern>,
+    exclusion_patterns: &[glob::Pattern],
 ) -> anyhow::Result<()> {
     let mut image_ids = Vec::new();
     for entry in WalkDir::new(album_dir) {
@@ -190,10 +191,7 @@ async fn update_album_dir(
         if let Some(image) = search_result.assets.items.first() {
             image_ids.push(Uuid::from_str(&image.id).unwrap());
         } else {
-            dbg!(format!(
-                "Image not found by Immich: {}",
-                &immich_path.display()
-            ));
+            warn!("Image not found by Immich: {}", &immich_path.display());
             continue;
         }
     }
@@ -206,19 +204,19 @@ async fn handle_album_folder(
     args: &Args,
     api_config: &Configuration,
     album_info_path: &Path,
-    exclusion_patterns: &Vec<glob::Pattern>,
+    exclusion_patterns: &[glob::Pattern],
 ) -> anyhow::Result<()> {
     let album_folder = album_info_path.parent().ok_or(anyhow!("wtf?"))?;
 
     let mut album_info: AlbumInfo = toml::from_str(&fs::read_to_string(album_info_path)?)?;
     let album_id = ensure_album(api_config, &mut album_info, album_info_path).await?;
-    dbg!(&album_info.metadata.name);
     update_album_dir(args, api_config, album_id, album_folder, exclusion_patterns).await?;
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    env_logger::init();
     let args = Args::parse();
     let api_config = Configuration {
         base_path: args.immich_host.clone(),
@@ -234,25 +232,32 @@ async fn main() -> anyhow::Result<()> {
     let mut exclusion_patterns: Vec<glob::Pattern> = library
         .exclusion_patterns
         .iter()
-        .map(|pattern| glob::Pattern::new(&pattern).unwrap())
+        .map(|pattern| glob::Pattern::new(pattern).unwrap())
         .collect();
     exclusion_patterns.push(glob::Pattern::new("**/*.toml").unwrap());
 
-    for entry in WalkDir::new(args.real_album_path.clone()) {
-        let entry = entry?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        match path.extension() {
-            Some(path) => {
-                if path != "toml" {
-                    continue;
-                }
+    for entry in WalkDir::new(args.real_album_path.clone())
+        .into_iter()
+        .filter_entry(|e| {
+            if !e.file_type().is_file() {
+                return false;
             }
-            None => continue,
-        };
-        handle_album_folder(&args, &api_config, path, &exclusion_patterns).await?;
+            if let Some(filename) = e.path().file_name() {
+                filename == OsStr::new("album.toml")
+            } else {
+                false
+            }
+        })
+    {
+        match entry {
+            Ok(entry) => {
+                let path = entry.path();
+                handle_album_folder(&args, &api_config, path, &exclusion_patterns).await?;
+            }
+            Err(err) => {
+                warn!(err:err; "An error occurred, ignoring path");
+            }
+        }
     }
 
     Ok(())
