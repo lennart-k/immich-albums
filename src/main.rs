@@ -11,7 +11,9 @@ use openapi::apis::album_api::{self};
 use openapi::apis::configuration::{ApiKey, Configuration};
 use openapi::apis::library_api;
 use openapi::apis::search_api::search_metadata;
-use openapi::models::{BulkIdsDto, CreateAlbumDto, MetadataSearchDto, UpdateAlbumDto};
+use openapi::models::{
+    AlbumResponseDto, BulkIdsDto, CreateAlbumDto, MetadataSearchDto, UpdateAlbumDto,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -23,10 +25,20 @@ struct AlbumInfo {
     immich: AlbumFileImmich,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 struct AlbumMetadata {
     name: String,
     description: Option<String>,
+}
+
+impl Into<UpdateAlbumDto> for AlbumMetadata {
+    fn into(self) -> UpdateAlbumDto {
+        UpdateAlbumDto {
+            album_name: Some(self.name),
+            description: self.description,
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -66,7 +78,8 @@ struct Args {
     immich_library_id: Uuid,
 }
 
-async fn ensure_album(
+/// Ensures that an album exists and syncs its metadata
+async fn sync_album_info(
     api_config: &Configuration,
     album_info: &mut AlbumInfo,
     filepath: &Path,
@@ -86,11 +99,12 @@ async fn ensure_album(
         };
 
         if immich_metadata != album_info.metadata {
+            info!("The local album metadata is not in sync with Immich");
             // Versions differ, now update the correct one
             if let Some(file_updated_at) = album_info.immich.updated_at {
                 if immich_updated_at > file_updated_at {
                     // Immich newer than local
-                    info!("Updating the local album metadata because we've updated on Immich");
+                    info!("Updating the local album metadata because Immich's version is newer");
                     album_info.metadata = immich_metadata;
                 } else {
                     // Local newer than Immich
@@ -98,11 +112,7 @@ async fn ensure_album(
                     let updated_at = album_api::update_album_info(
                         api_config,
                         &album_id.to_string(),
-                        UpdateAlbumDto {
-                            album_name: Some(album_info.metadata.name.to_owned()),
-                            description: album_info.metadata.description.to_owned(),
-                            ..Default::default()
-                        },
+                        album_info.metadata.clone().into(),
                     )
                     .await?
                     .updated_at;
@@ -114,11 +124,7 @@ async fn ensure_album(
                 let updated_at = album_api::update_album_info(
                     api_config,
                     &album_id.to_string(),
-                    UpdateAlbumDto {
-                        album_name: Some(album_info.metadata.name.to_owned()),
-                        description: album_info.metadata.description.to_owned(),
-                        ..Default::default()
-                    },
+                    album_info.metadata.clone().into(),
                 )
                 .await?
                 .updated_at;
@@ -209,7 +215,7 @@ async fn handle_album_folder(
     let album_folder = album_info_path.parent().ok_or(anyhow!("wtf?"))?;
 
     let mut album_info: AlbumInfo = toml::from_str(&fs::read_to_string(album_info_path)?)?;
-    let album_id = ensure_album(api_config, &mut album_info, album_info_path).await?;
+    let album_id = sync_album_info(api_config, &mut album_info, album_info_path).await?;
     update_album_dir(args, api_config, album_id, album_folder, exclusion_patterns).await?;
     Ok(())
 }
@@ -247,6 +253,7 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
                     let path = entry.path();
+                    info!("Found album at {}", entry.path().to_str().unwrap());
                     handle_album_folder(&args, &api_config, path, &exclusion_patterns).await?;
                 }
             }
