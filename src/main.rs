@@ -236,23 +236,19 @@ async fn main() -> anyhow::Result<()> {
         .collect();
     exclusion_patterns.push(glob::Pattern::new("**/*.toml").unwrap());
 
-    for entry in WalkDir::new(args.real_album_path.clone())
-        .into_iter()
-        .filter_entry(|e| {
-            if !e.file_type().is_file() {
-                return false;
-            }
-            if let Some(filename) = e.path().file_name() {
-                filename == OsStr::new("album.toml")
-            } else {
-                false
-            }
-        })
-    {
+    for entry in WalkDir::new(args.real_album_path.clone()).into_iter() {
         match entry {
             Ok(entry) => {
-                let path = entry.path();
-                handle_album_folder(&args, &api_config, path, &exclusion_patterns).await?;
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                if let Some(filename) = entry.path().file_name() {
+                    if filename != OsStr::new("album.toml") {
+                        continue;
+                    }
+                    let path = entry.path();
+                    handle_album_folder(&args, &api_config, path, &exclusion_patterns).await?;
+                }
             }
             Err(err) => {
                 warn!(err:err; "An error occurred, ignoring path");
