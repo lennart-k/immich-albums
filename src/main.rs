@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::{self};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -163,6 +164,10 @@ async fn add_assets_to_album(
     album_id: &Uuid,
     ids: Vec<Uuid>,
 ) -> anyhow::Result<()> {
+    info!("Adding {} new assets to album {album_id}", ids.len());
+    if ids.is_empty() {
+        return Ok(());
+    }
     album_api::add_assets_to_album(api_config, &album_id.to_string(), BulkIdsDto { ids }, None)
         .await?;
     Ok(())
@@ -175,6 +180,14 @@ async fn update_album_dir(
     album_dir: &Path,
     exclusion_patterns: &[glob::Pattern],
 ) -> anyhow::Result<()> {
+    let existing_image_ids: HashSet<Uuid> =
+        album_api::get_album_info(api_config, &album_id.to_string(), None, Some(false))
+            .await?
+            .assets
+            .iter_mut()
+            .map(|asset_response| Uuid::from_str(&asset_response.id).unwrap())
+            .collect();
+
     let mut image_ids = Vec::new();
     for entry in WalkDir::new(album_dir) {
         let entry = entry?;
@@ -207,8 +220,12 @@ async fn update_album_dir(
             continue;
         }
     }
+    let new_image_ids = image_ids
+        .into_iter()
+        .filter(|id| !existing_image_ids.contains(id))
+        .collect();
     // TODO: Maybe add chunking for really large albums?
-    add_assets_to_album(api_config, &album_id, image_ids).await?;
+    add_assets_to_album(api_config, &album_id, new_image_ids).await?;
     Ok(())
 }
 
