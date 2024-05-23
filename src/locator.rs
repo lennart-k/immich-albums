@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use regex::Regex;
 use walkdir::{DirEntry, WalkDir};
 
-use crate::AlbumMetadata;
+use crate::album::AlbumMetadata;
 
 pub(crate) trait AlbumLocator {
     /// Checks if a path matches an album path and if so returns the path match
