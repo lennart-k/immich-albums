@@ -1,41 +1,41 @@
-use std::ffi::OsStr;
 use std::fs::{self};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::anyhow;
 use chrono::{DateTime, Utc};
 use clap::Parser;
+use locator::{AlbumLocator, DefaultAlbumLocator};
 use log::{info, warn};
 use openapi::apis::album_api::{self};
 use openapi::apis::configuration::{ApiKey, Configuration};
 use openapi::apis::library_api;
 use openapi::apis::search_api::search_metadata;
-use openapi::models::{
-    AlbumResponseDto, BulkIdsDto, CreateAlbumDto, MetadataSearchDto, UpdateAlbumDto,
-};
+use openapi::models::{BulkIdsDto, CreateAlbumDto, MetadataSearchDto, UpdateAlbumDto};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-#[derive(Serialize, Deserialize, Debug)]
+mod locator;
+
+#[derive(Serialize, Deserialize, Debug, Default)]
 struct AlbumInfo {
     metadata: AlbumMetadata,
     #[serde(default)]
     immich: AlbumFileImmich,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 struct AlbumMetadata {
     name: String,
     description: Option<String>,
 }
 
-impl Into<UpdateAlbumDto> for AlbumMetadata {
-    fn into(self) -> UpdateAlbumDto {
-        UpdateAlbumDto {
-            album_name: Some(self.name),
-            description: self.description,
+impl From<AlbumMetadata> for UpdateAlbumDto {
+    fn from(value: AlbumMetadata) -> Self {
+        Self {
+            album_name: Some(value.name),
+            description: value.description,
             ..Default::default()
         }
     }
@@ -67,7 +67,7 @@ struct Args {
         env,
         help = "The filesystem path where immich-albums can find your albums"
     )]
-    real_album_path: String,
+    real_album_path: PathBuf,
     #[arg(
         long,
         env,
@@ -76,6 +76,12 @@ struct Args {
     immich_album_path: String,
     #[arg(long, env, help = "The id of the external library")]
     immich_library_id: Uuid,
+    #[arg(
+        long,
+        env,
+        help = "Create an album.toml for discovered albums without one. (Otherwise the album will be ignored for now)"
+    )]
+    create_album_file: bool,
 }
 
 /// Ensures that an album exists and syncs its metadata
@@ -222,7 +228,9 @@ async fn handle_album_folder(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Info)
+        .init();
     let args = Args::parse();
     let api_config = Configuration {
         base_path: args.immich_host.clone(),
@@ -233,8 +241,12 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
 
+    // let basepath = PathBuf::from_str(&args.real_album_path).unwrap();
+    let locator = DefaultAlbumLocator::new(args.real_album_path.clone());
+
     let library =
         library_api::get_library(&api_config, &args.immich_library_id.to_string()).await?;
+
     let mut exclusion_patterns: Vec<glob::Pattern> = library
         .exclusion_patterns
         .iter()
@@ -242,25 +254,31 @@ async fn main() -> anyhow::Result<()> {
         .collect();
     exclusion_patterns.push(glob::Pattern::new("**/*.toml").unwrap());
 
-    for entry in WalkDir::new(args.real_album_path.clone()).into_iter() {
-        match entry {
-            Ok(entry) => {
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                if let Some(filename) = entry.path().file_name() {
-                    if filename != OsStr::new("album.toml") {
-                        continue;
-                    }
-                    let path = entry.path();
-                    info!("Found album at {}", entry.path().to_str().unwrap());
-                    handle_album_folder(&args, &api_config, path, &exclusion_patterns).await?;
-                }
+    for (path_match, dir_entry) in locator.locate_iter() {
+        let album_path = dir_entry.path();
+        info!("Found album at {}", album_path.to_str().unwrap());
+        // Ensure album.toml exists
+        let album_file_path = album_path.join("album.toml");
+        if !album_file_path.is_file() {
+            if !args.create_album_file {
+                // TODO: proper handling
+                return Err(anyhow!(
+                    "Not allowed to create missing file: {}",
+                    album_file_path.to_str().unwrap()
+                ));
             }
-            Err(err) => {
-                warn!(err:err; "An error occurred, ignoring path");
-            }
+
+            warn!("Album found without album.toml, creating one");
+            fs::write(
+                &album_file_path,
+                toml::to_string_pretty(&AlbumInfo {
+                    metadata: path_match,
+                    ..Default::default()
+                })?,
+            )?;
         }
+
+        handle_album_folder(&args, &api_config, &album_file_path, &exclusion_patterns).await?;
     }
 
     Ok(())
