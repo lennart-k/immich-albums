@@ -13,12 +13,11 @@ use openapi::{
     apis::{album_api, configuration::Configuration, library_api, search_api::search_metadata},
     models::{BulkIdsDto, CreateAlbumDto, MetadataSearchDto},
 };
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::{
-    album::AlbumMetadata,
+    album::{AlbumInfo, AlbumMetadata},
     locator::{AlbumLocator, DefaultAlbumLocator},
 };
 
@@ -44,19 +43,6 @@ pub struct ExternalAlbumsArgs {
         help = "Create an album.toml for discovered albums without one. (Otherwise the album will be ignored for now)"
     )]
     create_album_file: bool,
-}
-
-#[derive(Serialize, Deserialize, Debug, Default)]
-struct AlbumInfo {
-    metadata: AlbumMetadata,
-    #[serde(default)]
-    immich: AlbumFileImmich,
-}
-
-#[derive(Serialize, Deserialize, Debug, Default)]
-struct AlbumFileImmich {
-    album_id: Option<Uuid>,
-    updated_at: Option<DateTime<Utc>>,
 }
 
 /// Ensures that an album exists and syncs its metadata
