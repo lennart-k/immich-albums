@@ -216,6 +216,7 @@ async fn handle_album_folder(
     update_album_dir(args, api_config, album_id, album_folder, exclusion_patterns).await?;
     Ok(())
 }
+
 pub async fn external_albums_command(
     api_config: &Configuration,
     args: &ExternalAlbumsArgs,
